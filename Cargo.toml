@@ -1,0 +1,99 @@
+[workspace]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "unwind"
+
+[package]
+name = "loregraph"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "loregraph — memory knowledge-graph for AI coding-agent sessions + repos (single binary). PoC: Claude Code chat ingest + repo crunch + graph + canvas."
+repository = "https://github.com/lucheeseng827/loregraph"
+publish = false
+
+# Scaffold note: loregraph ships as a SINGLE crate today. Per PLAN.md §8 it graduates to a
+# multi-crate [workspace] (crates/loregraph-{core,ingest,coderepo,graph,embed,store,api,mcp,
+# cli}) once it outgrows one package; until then, keep it a plain package.
+
+[lib]
+name = "lore"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lore"
+path = "src/main.rs"
+
+# --- ACTIVE dependencies (PoC) ---------------------------------------------------
+# Default build invariant (PLAN.md §7): ZERO ML / network / C deps. Everything below is
+# pure-Rust. Heavy/optional backends (tree-sitter, usearch, local embedding models, the
+# rmcp MCP server, the OpenRouter proxy, the Cursor SQLite reader) land behind cargo
+# features in later phases and are intentionally NOT wired yet.
+[dependencies]
+clap = { version = "4", features = ["derive"] }      # CLI: index / serve / ask / mcp / doctor / version
+anyhow = "1"                                          # binary error ergonomics
+thiserror = "2"                                       # library error types
+serde = { version = "1", features = ["derive"] }      # node/edge/session model derives
+serde_json = "1"                                      # JSONL transcripts + wire JSON + snapshot store
+blake3 = "1"                                          # content-addressed node ids + dedup + redaction hashes
+crc32fast = "1"                                       # per-record WAL checksum (torn/corrupt-tail detection)
+redb = "4.1"                                           # durable graph store (pure-Rust ACID, crash-safe txns); matches evald
+chrono = { version = "0.4", features = ["serde"] }    # transcript timestamps -> millis, timeline
+petgraph = "0.8"                                      # in-memory graph (StableDiGraph) traversal / bounded BFS
+walkdir = "2"                                         # repo walk (the `ignore` crate is the MVP upgrade)
+regex = "1"                                           # heuristic symbol extraction + secret redaction
+rust-embed = "8"                                      # embed the vanilla-JS canvas SPA into the binary (air-gap, no Node)
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "io-std"] }  # io-std: stdio MCP transport
+axum = "0.8"                                          # HTTP API + canvas SPA fallback (matches evald)
+gix = { version = "0.83", default-features = false, features = ["blob-diff", "revision", "max-performance-safe", "sha1"] }  # pure-Rust git history mining → commit provenance; matches the the merge gate line
+tracing = "0.1"                                       # self-observability
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# --- OPTIONAL: MCP memory server (feature `mcp`) ---------------------------------
+# The agent-facing server (`lore mcp`) that lets Claude Code / any MCP client call
+# memory.search / memory.recall_decision / … over stdio. Off by default so the base build
+# stays pure-Rust and dependency-light. Built on the official rmcp SDK (PLAN.md §5).
+rmcp = { version = "1.8", default-features = false, features = ["server", "macros", "transport-io", "schemars"], optional = true }
+schemars = { version = "1", optional = true }         # JsonSchema derive for the MCP tool argument structs
+
+# --- OPTIONAL: BYO-key LLM decision extraction (feature `byo-llm`, PLAN.md §5.3 T3) ---
+# A richer decision extractor that calls the user's own OpenAI-compatible chat endpoint to
+# distill a turn into {decision, rationale, rejected}. OFF by default — it needs network + an
+# API key, which the air-gap default forbids. rustls (no OpenSSL/C), blocking client (ingest
+# is sync, off the hot path). The pure request-build / response-parse logic is unit-tested
+# without a key or network; only the actual HTTP call needs credentials.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"], optional = true }
+
+# --- PLANNED dependencies (later phases; intentionally NOT active yet) ------------
+# Activate per PLAN.md §7/§9. Left commented so the PoC builds fast and pure-Rust.
+#
+# (redb + crc32fast are now ACTIVE above — the durable store landed.)
+# datafusion      = "54"      # SQL/analytics over Parquet snapshots (Beta, off the hot path)
+# arrow/parquet   = "58"      # columnar analytics blocks (Beta)
+# (gix is now ACTIVE above — commit-provenance mining landed.)
+# (reqwest is now ACTIVE above, optional behind `byo-llm` — the LLM decision extractor.)
+# (rmcp is now ACTIVE above, optional behind `mcp` — stdio default; streamable-http is planned.)
+# rusqlite/libsql            # Cursor/Cline `state.vscdb` reader (feature `cursor`)
+#
+[features]
+# The agent-facing MCP memory server (stdio). Opt-in: pulls rmcp + schemars.
+mcp = ["dep:rmcp", "dep:schemars"]
+# BYO-key LLM decision extraction (T3). Opt-in: pulls reqwest. Needs LORE_LLM_* env at runtime.
+byo-llm = ["dep:reqwest"]
+# PLANNED (later phases; intentionally NOT wired yet):
+# treesitter = []   # precise symbols/refs via tree-sitter (the ONLY C dep — off by default, musl care)
+# usearch    = []   # alt at-scale ANN (C++ — off by default)
+# localmodel = []   # real local embeddings (model2vec/fastembed/candle — heavy, off by default)
+# proxy      = []   # `lore proxy` OpenRouter logging pass-through
+# cursor     = []   # Cursor/Cline SQLite ingest
+
+[dev-dependencies]
+tempfile = "3"                                        # isolated data dirs for ingest / recovery tests
+
+# NOTE: the release profile (opt-level="z", lto, codegen-units=1, strip) is inherited from
+# the root workspace [profile.release]; a member must not redeclare it. When loregraph
+# graduates to its own workspace it carries that profile.

@@ -1,0 +1,66 @@
+# loregraph sample config (PoC).
+#
+# Flag > env (LORE_*) > this file > default. Copy to `.lore/lore.toml` or pass `--config`.
+# The PoC reads most of this from CLI flags; the keys below document the MVP config surface.
+
+# Where the durable graph lives: a redb database + write-ahead log (crash-safe commit
+# protocol; see ARCHITECTURE.md).
+data_dir = ".lore"
+
+# The HTTP canvas + API bind address. Loopback by default — never listens on the network
+# unasked.
+serve_addr = "127.0.0.1:7700"
+
+[sources]
+# Which connectors to ingest. PoC ships claude_code; the rest land in Beta behind features.
+enabled = ["claude_code"]
+
+# Override a connector's discovery root (else it auto-discovers, e.g. ~/.claude/projects).
+# [sources.claude_code]
+# root = "~/.claude/projects"
+
+# [sources.codex]            # feature-gated (Beta)
+# root = "~/.codex/sessions"
+
+[repo]
+# Repos to crunch into the code half of the graph.
+paths = ["."]
+
+[redact]
+# Secret redaction runs on ingest, before persist/embed/hash. On by default; do not turn off
+# for a shared/hosted graph.
+enabled = true
+# `--raw` (local only, loud) bypasses redaction for a single run; never the default.
+
+[embed]
+# `hash` (default, deps-free, LEXICAL only — no synonyms) | `static` (real SEMANTIC recall
+# via a local static word-embedding table, no inference/network — R2, PLAN.md §5.3).
+backend = "hash"
+# model = "/path/to/glove.6B.100d.txt"   # config surface; PoC selects via env (below)
+#
+# The PoC reads the embedder from the environment:
+#   LORE_EMBED_BACKEND=static  LORE_EMBED_MODEL=/path/to/vectors.txt   lore index …
+# `static` loads a local GloVe-format vectors file (`token f1 f2 … fN` per line; e.g. GloVe 6B,
+# or a model2vec/word2vec export converted to GloVe text) — no inference, no network at query
+# time. A store remembers which embedder built it and refuses to open under a different one;
+# switch embedders by re-running `lore index` into a fresh data_dir.
+
+[extract]
+# Decision extraction backend.
+# `deterministic` (default): cue-phrase heuristic, air-gap, no key needed.
+# `byo-llm` (feature `byo-llm`, NOW WIRED): `ingest_session` re-distills the candidate turns
+# into {decision, rationale, rejected} via YOUR own LLM, stamping extractor="byo-llm-v1".
+# Activated when built `--features byo-llm` AND the LORE_LLM_* env below is set; any error
+# (no key, 4xx, network) falls back to the deterministic result, so decisions are never lost.
+# Two providers (auto-detected from the endpoint host, or set LORE_LLM_PROVIDER=openai|anthropic):
+#   # OpenAI-compatible (OpenAI, OpenRouter, vLLM, …)
+#   LORE_LLM_ENDPOINT=https://api.openai.com/v1/chat/completions
+#   LORE_LLM_API_KEY=sk-...        LORE_LLM_MODEL=gpt-4o-mini
+#   # Anthropic Messages
+#   LORE_LLM_ENDPOINT=https://api.anthropic.com/v1/messages
+#   LORE_LLM_API_KEY=sk-ant-...    LORE_LLM_MODEL=claude-haiku-4-5-20251001
+backend = "deterministic"
+
+[mcp]
+# The agent-facing memory server (feature `mcp`). stdio locally; a streamable-HTTP transport is planned.
+transport = "stdio"

@@ -1,0 +1,5 @@
+{"type":"user","uuid":"u1","parentUuid":null,"timestamp":"2026-05-02T14:10:00Z","cwd":"/work/demo","gitBranch":"main","version":"2.1.195","message":{"role":"user","content":"What storage engine should we use for the durable graph?"}}
+{"type":"assistant","uuid":"a1","parentUuid":"u1","timestamp":"2026-05-02T14:11:00Z","cwd":"/work/demo","gitBranch":"main","version":"2.1.195","message":{"role":"assistant","content":[{"type":"text","text":"Let's use redb for the durable store instead of sled — it has clean crash-safe transactions and stays pure-Rust for a clean static musl build."},{"type":"tool_use","id":"t1","name":"Edit","input":{"file_path":"src/store.rs"}}]}}
+{"type":"queue-operation","uuid":"q1","timestamp":"2026-05-02T14:11:30Z","operation":"compact"}
+{"type":"user","uuid":"u2","parentUuid":"a1","timestamp":"2026-05-02T14:12:00Z","cwd":"/work/demo","gitBranch":"main","version":"2.1.195","message":{"role":"user","content":"Good. For the canvas renderer, going with Cytoscape.js for the MVP and Sigma.js for scale."}}
+{"type":"summary","uuid":"s1","summary":"Chose redb for storage and Cytoscape/Sigma for the canvas.","leafUuid":"u2"}
