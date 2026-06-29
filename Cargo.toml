@@ -16,6 +16,19 @@ description = "loregraph — memory knowledge-graph for AI coding-agent sessions
 repository = "https://github.com/lucheeseng827/loregraph"
 publish = false
 
+# cargo-binstall: fetch the prebuilt `lore` binary from a GitHub release instead of compiling.
+#   cargo binstall lore
+# `{ repo }` resolves from `repository` above (rewritten to the public mirror on sync); asset
+# names match the release workflow's `lore-<target>.<ext>` artifacts. Inert in the monorepo
+# (publish = false); active on the published `loregraph` crate.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/lore-{ target }{ archive-suffix }"
+bin-dir = "lore{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 # Scaffold note: loregraph ships as a SINGLE crate today. Per PLAN.md §8 it graduates to a
 # multi-crate [workspace] (crates/loregraph-{core,ingest,coderepo,graph,embed,store,api,mcp,
 # cli}) once it outgrows one package; until then, keep it a plain package.
@@ -68,6 +81,18 @@ schemars = { version = "1", optional = true }         # JsonSchema derive for th
 # without a key or network; only the actual HTTP call needs credentials.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"], optional = true }
 
+# --- OPTIONAL: neural embedder (feature `neural`, PLAN.md §5.3 R2 — Beta tier) ---
+# Real contextual sentence embeddings via a local transformer (candle = pure-Rust CPU
+# inference; no ONNX/C in the model-inference path — tokenizers uses the Oniguruma/C
+# regex backend via the "onig" feature for text preprocessing). OFF by default and a heavy build. Needs a local
+# model directory (config.json + tokenizer.json + model.safetensors, e.g. all-MiniLM-L6-v2) —
+# no network at query time. The static GloVe backend (always-compiled) stays the lighter
+# semantic option; this is the contextual-embeddings upgrade.
+candle-core = { version = "0.8", optional = true }
+candle-nn = { version = "0.8", optional = true }
+candle-transformers = { version = "0.8", optional = true }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"], optional = true }
+
 # --- PLANNED dependencies (later phases; intentionally NOT active yet) ------------
 # Activate per PLAN.md §7/§9. Left commented so the PoC builds fast and pure-Rust.
 #
@@ -84,6 +109,14 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 mcp = ["dep:rmcp", "dep:schemars"]
 # BYO-key LLM decision extraction (T3). Opt-in: pulls reqwest. Needs LORE_LLM_* env at runtime.
 byo-llm = ["dep:reqwest"]
+# Neural embedder (R2 Beta). Opt-in: pulls candle + tokenizers. Needs a local model dir at
+# runtime (LORE_EMBED_BACKEND=neural LORE_EMBED_MODEL=<dir>). Heavy build.
+neural = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
+# Sublinear approximate vector search (HNSW). Pure-Rust, ZERO new deps — swaps the exact
+# BruteForceIndex for a navigable-small-world graph at the same trait. Off by default: brute
+# force is the recall oracle and exact at PoC scale. A gate test pins recall@1 >= 0.98 vs the
+# oracle at the 256-dim embedding width.
+index-hnsw = []
 # PLANNED (later phases; intentionally NOT wired yet):
 # treesitter = []   # precise symbols/refs via tree-sitter (the ONLY C dep — off by default, musl care)
 # usearch    = []   # alt at-scale ANN (C++ — off by default)

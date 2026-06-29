@@ -112,9 +112,10 @@ redb, never the source of truth), `BruteForceIndex` (exact-cosine, O(1) upsert),
 `HashEmbedder` (deterministic token-bag), and `ask::recall` (a free function, not yet a
 `Retriever` trait). **As-built note:** the seams are concrete types today, not the
 object-safe traits above; `StaticEmbedder` (real semantic word-vectors) is **runtime-selected
-via env, no dependency** — neural embedders (model2vec/fastembed/candle), pure-Rust HNSW
-(`index-hnsw`), tree-sitter (`treesitter`), and usearch remain feature-gated/deferred. See
-[`ARCHITECTURE.md`](./ARCHITECTURE.md) §0.
+via env, no dependency**. The neural embedder (candle, `neural`) and the pure-Rust zero-dep
+HNSW index (`index-hnsw`, a build-time swap for `BruteForceIndex` at the same seam) are
+**implemented behind their features**; tree-sitter (`treesitter`) and usearch remain
+deferred. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) §0.
 
 ## 2. Data model
 
@@ -387,9 +388,9 @@ ROI (impact ÷ effort); each is a discrete, independently-shippable build step.
 | # | Feature | Tier | Deps | What / why |
 |---|---|---|---|---|
 | R1 | **Kind-aware recall** | ✅ PoC | none | Two parts: (a) restrict the **semantic** candidate set to value/chat nodes (`is_semantic_memory`: Decision/Implementation/Turn/Session/DesignDoc/Concept/Pattern/DebtSignal) — a code atom's 1–2-token name bag is pure `HashEmbedder` noise and was flooding "what did we decide"; (b) a per-`NodeKind` **prior** (`kind_weight`: Decision/Implementation 1.0 → Turn 0.85 → Symbol 0.3) on the graph + lexical passes. Code atoms still surface — graph-expanded from a real seed, or via exact lexical name match merged into the indexed path before ranking — just never as a fuzzy semantic hit. Verified against the real index: "stripe billing" / "WAL" now return the actual Turns/Decisions (with provenance), not `Symbol`s. **The visible fix.** |
-| R2 | **Static semantic embedder** | ✅ (static) / Beta (neural) | none (static) | `StaticEmbedder`: real **semantic** recall via a local static word-embedding table (the model2vec idea — token→vector lookup + mean-pool, **no inference, no ONNX/C, no network at query time**). Loads a GloVe-format vectors file the operator supplies (`LORE_EMBED_BACKEND=static LORE_EMBED_MODEL=…`); air-gap clean. The `Embedder` seam now stamps an **embedder id + dim** into the store and **refuses to open under a mismatched embedder** (cosine across dims is meaningless). Verified: query "persistent database" recalls a "durable store" turn with **zero shared words** (hash scores ~0). The static table needs no dependency so it always compiles; **heavier neural backends (fastembed/candle transformer inference) remain feature-gated future work**. |
+| R2 | **Static semantic embedder** | ✅ (static) / Beta (neural) | none (static) | `StaticEmbedder`: real **semantic** recall via a local static word-embedding table (the model2vec idea — token→vector lookup + mean-pool, **no inference, no ONNX/C, no network at query time**). Loads a GloVe-format vectors file the operator supplies (`LORE_EMBED_BACKEND=static LORE_EMBED_MODEL=…`); air-gap clean. The `Embedder` seam now stamps an **embedder id + dim** into the store and **refuses to open under a mismatched embedder** (cosine across dims is meaningless). Verified: query "persistent database" recalls a "durable store" turn with **zero shared words** (hash scores ~0). The static table needs no dependency so it always compiles. **Neural (contextual) embedder now landed behind `--features neural`**: `NeuralEmbedder` runs a local BERT-family model (candle, pure-Rust CPU — no ONNX/C) from a model dir (`config.json`+`tokenizer.json`+`model.safetensors`, e.g. all-MiniLM-L6-v2), tokenize → forward → attention-masked mean-pool → L2-normalize, no network at query time (`LORE_EMBED_BACKEND=neural`). Compiles clean; runtime inference needs the operator's model dir. |
 | R3 | **BM25 lexical fallback** | ✅ MVP | none | Replaced the raw substring-count fallback with length-normalized, IDF-weighted **BM25** (Okapi k1=1.2, b=0.75) over node text, still ×`kind_weight`. Rare query terms now carry weight and a long body no longer wins on length. Makes the **air-gap default** (no model loaded) genuinely usable, not just `degraded`. |
-| R4 | **Centrality prior + supersession filter** | ✅ MVP | none | (a) **Centrality prior**: a `ln(1+degree)` nudge applied **only to `Decision`/`Implementation`** — for a value node, high degree means it shaped many files / recurred across sessions (real importance); structural hubs (`Session`/`Repo`, huge fanout) get no prior, else they flood recall (observed + fixed). (b) **Supersession filter**: recall redirects a superseded node to the decision that replaced it (`MemGraph.superseded_by`, following the `Supersedes` chain to its head), so a stale decision never out-ranks or hides its superseder. The filter is live + tested; **auto-creating `Supersedes` edges (drift detection) stays Beta** — it is genuinely fuzzy and a false positive would *hide* a valid decision, so it is not heuristically guessed here. |
+| R4 | **Centrality prior + supersession filter** | ✅ MVP | none | (a) **Centrality prior**: a `ln(1+degree)` nudge applied **only to `Decision`/`Implementation`** — for a value node, high degree means it shaped many files / recurred across sessions (real importance); structural hubs (`Session`/`Repo`, huge fanout) get no prior, else they flood recall (observed + fixed). (b) **Supersession filter**: recall redirects a superseded node to the decision that replaced it (`MemGraph.superseded_by`, following the `Supersedes` chain to its head), so a stale decision never out-ranks or hides its superseder. The filter is live + tested. (c) **Drift detection** (`Store::detect_supersessions`, runs at the end of `index`): a decision that **explicitly** names what it replaces (`… instead of <X>`) supersedes the **unique** older decision in the **same scope** whose text contains `<X>` — high-precision-only, never inferred from topic similarity (a false positive would hide a valid decision), ambiguous/same-time pairs skipped. Verified on the real index: 2 conservative links. |
 
 #### Tight nodes (the token lever)
 
@@ -403,9 +404,10 @@ ROI (impact ÷ effort); each is a discrete, independently-shippable build step.
 no-new-dependency recall-quality + node-tightness set has landed**, verified against fixtures
 and the real index. The Beta quality tier remains: the heavier **neural R2 backend**
 (fastembed/candle transformer inference, behind a cargo feature), **T3 `byo-llm-v1`** (BYO-key
-LLM distillation via `reqwest`, off the air-gap default), and **supersedes drift detection**
-(to make the R4 filter fire automatically). Each needs a dependency and/or network + a model
-or API key, so each is its own verified PR rather than part of this deterministic set.
+LLM distillation via `reqwest`, off the air-gap default). Each needs a dependency and/or
+network + a model or API key, so each is its own verified PR rather than part of this
+deterministic set. (**Supersedes drift detection** has since landed — `detect_supersessions`,
+high-precision explicit-`instead of` only — making the R4 filter fire automatically.)
 
 ## 6. Canvas GUI
 
@@ -535,7 +537,9 @@ Build steps (each independently demoable):
 1. Claude Code adapter → normalized stdout (`lore index --dry-run`).
 2. redb + content-addressed blobs + commit protocol; **kill-9 survives**.
 3. repo walk + regex symbols + `Touches`/`References`.
-4. HashEmbedder + HNSW + `lore ask` (vector + BFS).
+4. HashEmbedder + HNSW + `lore ask` (vector + BFS). ✅ `BruteForceIndex` default + pure-Rust
+   HNSW behind `--features index-hnsw` (`VectorIndex` enum, recall@1 ≥ 0.98 vs the exact oracle
+   at 256-dim).
 
 ### MVP — v0.1.0 (first public OSS release)
 
@@ -557,7 +561,13 @@ Build steps:
    `memory.note`) over stdio; verified with a real `initialize` → `tools/list` →
    `tools/call` round-trip. Default build stays pure-Rust (rmcp is opt-in).
 7. axum API + canvas. ✅ (PoC Canvas2D renderer; Cytoscape/Sigma tiers per §6.)
-8. redaction + golden-fixture tests + release. ✅ redaction + tests; release packaging pending.
+8. redaction + golden-fixture tests + release. ✅ redaction + tests; release packaging
+   **scaffolded** — hand-rolled (no cargo-dist): static-musl x86_64+aarch64 + macOS + Windows
+   build matrix, GitHub release with `SHA256SUMS`, `cargo-binstall` metadata, a Homebrew formula
+   (repo-as-tap, auto-bumped), and a multi-arch distroless image to ghcr (`ops/release.yml` →
+   mirror `.github/workflows/release.yml`, `Dockerfile`, `Formula/lore.rb`). Pending: cut the
+   first real `v*` tag on the mirror to exercise it end-to-end (+ crates.io publish to light up
+   `cargo binstall`).
 9. **recall quality (§5.3):** R1 kind-aware scoring (now) + T1 distilled decisions + R3 BM25
    fallback + R4 full hybrid/supersession + T2 summary/body split — the no-ML half of the
    token-savings precondition.

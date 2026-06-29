@@ -107,6 +107,43 @@ pub fn extract(turns: &[Turn]) -> Vec<Candidate> {
     out
 }
 
+/// Cues that EXPLICITLY name a superseded prior choice. The text immediately after one of
+/// these is the replaced subject (e.g. "switch to redb **instead of sled**").
+const SUPERSEDE_CUES: &[&str] = &[
+    "instead of ",
+    "rather than ",
+    "in place of ",
+    "switch from ",
+    "switching from ",
+    "migrate off ",
+    "moving off ",
+    "replacing ",
+    "supersedes ",
+    "deprecates ",
+];
+
+/// Tokens skipped when reading the replaced subject (so "instead of the sled store" → "sled").
+const SUBJECT_STOP: &[&str] = &["the", "a", "an", "our", "its", "this", "that", "using", "use", "old"];
+
+/// If a decision **explicitly** names what it replaces (`… instead of <X> …`), return the first
+/// significant token of `<X>` (the prior choice, e.g. `"sled"`), lowercased. Returns `None`
+/// otherwise. High-precision by design: supersession is only ever asserted from an explicit
+/// cue, never inferred from topic similarity — a false positive would *hide* a still-valid
+/// decision in recall (R4, PLAN.md §5.3).
+pub fn superseded_subject(text_lower: &str) -> Option<String> {
+    for cue in SUPERSEDE_CUES {
+        if let Some(pos) = text_lower.find(cue) {
+            let after = &text_lower[pos + cue.len()..];
+            for tok in after.split(|c: char| !c.is_alphanumeric()) {
+                if tok.len() > 2 && !SUBJECT_STOP.contains(&tok) {
+                    return Some(tok.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Extract the sentence containing the first occurrence of `cue` (case-insensitive),
 /// trimmed to a sane length.
 fn sentence_around(original: &str, lower: &str, cue: &str) -> Option<String> {
@@ -164,6 +201,17 @@ mod tests {
         let got = extract(&turns);
         assert_eq!(got.len(), 1, "only the substantive decision survives");
         assert!(got[0].text.to_lowercase().contains("redb"));
+    }
+
+    #[test]
+    fn reads_explicit_superseded_subject_only() {
+        assert_eq!(superseded_subject("switch to redb instead of sled for the store"), Some("sled".into()));
+        assert_eq!(superseded_subject("use redb rather than the old sqlite db"), Some("sqlite".into()));
+        assert_eq!(superseded_subject("migrate off postgres to sqlite"), Some("postgres".into()));
+        // no explicit cue -> no supersession asserted
+        assert_eq!(superseded_subject("we'll use redb for durability"), None);
+        // cue but only stop/short words after -> None (never guess)
+        assert_eq!(superseded_subject("do it instead of it"), None);
     }
 
     #[test]

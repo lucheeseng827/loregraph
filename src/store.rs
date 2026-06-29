@@ -28,7 +28,7 @@ use crate::decision;
 use crate::embed::{DynEmbedder, Embedder};
 use crate::git;
 use crate::graph::MemGraph;
-use crate::index::BruteForceIndex;
+use crate::index::VectorIndex;
 use crate::model::{
     summarize, CanonicalSession, Edge, EdgeKind, MessageKind, Node, NodeId, NodeKind, Provenance,
 };
@@ -144,7 +144,7 @@ impl Wal {
 pub struct Store {
     dir: PathBuf,
     pub graph: MemGraph,
-    pub index: BruteForceIndex,
+    pub index: VectorIndex,
     embedder: DynEmbedder,
     db: Database,
     wal: Wal,
@@ -212,7 +212,7 @@ fn file_identity(repo_ns: &str, rel: &str) -> String {
     format!("{repo_ns}\u{1}{rel}")
 }
 
-fn apply(graph: &mut MemGraph, index: &mut BruteForceIndex, rec: WalRecord) {
+fn apply(graph: &mut MemGraph, index: &mut VectorIndex, rec: WalRecord) {
     match rec {
         WalRecord::Node(n) => graph.upsert_node(n),
         WalRecord::Edge(e) => graph.upsert_edge(e),
@@ -297,7 +297,7 @@ impl Store {
         }
 
         let mut graph = MemGraph::new();
-        let mut index = BruteForceIndex::new();
+        let mut index = VectorIndex::new();
 
         // Load the committed base from redb (nodes before edges, so endpoints exist).
         // Deserialize persisted embedder metadata here but defer the mismatch check until
@@ -428,6 +428,7 @@ impl Store {
         let node = Node::new(NodeKind::Decision, &identity, label, now)
             .with_body(text.clone())
             .with_summary(summarize(&text))
+            .attr("scope", scope)
             .with_provenance(Provenance {
                 source_tool: "mcp".into(),
                 extractor: "manual".into(),
@@ -557,6 +558,8 @@ impl Store {
             let mut dec_node = Node::new(NodeKind::Decision, &dec_identity, text.clone(), started)
                 .with_body(body)
                 .with_summary(summarize(&text))
+                // `scope` (repo or session) groups decisions for supersession detection.
+                .attr("scope", scope.clone())
                 .with_provenance(Provenance {
                     confidence: cand.confidence,
                     extractor: cand.extractor.to_string(),
@@ -691,6 +694,64 @@ impl Store {
 
         self.commit_mutations(recs)
     }
+
+    /// Detect + record `Supersedes` edges over the whole graph (R4 drift detection, PLAN.md
+    /// §5.3). **Conservative + high-precision:** a decision that *explicitly* names what it
+    /// replaces (`… instead of <X>`) supersedes the **unique** older decision in the **same
+    /// scope** whose text contains `<X>` as a word. Ambiguous (0 or >1 candidate) or same-time
+    /// pairs are skipped — supersession is never guessed, because the recall filter redirects a
+    /// superseded decision and a false positive would hide a still-valid one. Idempotent:
+    /// `Supersedes` edges are content-addressed, so re-running re-asserts the same edges.
+    /// Returns the number of edges recorded.
+    pub fn detect_supersessions(&mut self) -> anyhow::Result<usize> {
+        struct Dec {
+            id: NodeId,
+            scope: String,
+            text: String,
+            ts: i64,
+        }
+        let decisions: Vec<Dec> = self
+            .graph
+            .nodes
+            .values()
+            .filter(|n| n.kind == NodeKind::Decision)
+            .map(|n| Dec {
+                id: n.id,
+                scope: n.attrs.get("scope").cloned().unwrap_or_default(),
+                text: n.label.to_lowercase(),
+                ts: n.first_seen_ms,
+            })
+            .collect();
+
+        let mut recs: Vec<WalRecord> = Vec::new();
+        for d in &decisions {
+            let Some(x) = decision::superseded_subject(&d.text) else { continue };
+            let matches: Vec<&Dec> = decisions
+                .iter()
+                .filter(|o| {
+                    o.id != d.id
+                        && !o.scope.is_empty()
+                        && o.scope == d.scope
+                        && o.ts < d.ts // the superseder is strictly newer
+                        && contains_word(&o.text, &x)
+                })
+                .collect();
+            if matches.len() == 1 {
+                // `from` supersedes `to` (graph.superseded_by records to → from).
+                recs.push(WalRecord::Edge(Edge::new(d.id, matches[0].id, EdgeKind::Supersedes)));
+            }
+        }
+        let n = recs.len();
+        if n > 0 {
+            self.commit_mutations(recs)?;
+        }
+        Ok(n)
+    }
+}
+
+/// Whether `word` appears as a standalone alphanumeric token in `text` (both lowercased).
+fn contains_word(text: &str, word: &str) -> bool {
+    text.split(|c: char| !c.is_alphanumeric()).any(|t| t == word)
 }
 
 /// Make a touched-file path repo-relative against the session's repo root when possible, so
@@ -749,6 +810,60 @@ mod tests {
                 turn(1, MessageKind::Assistant, "Let's use redb for the durable store.", &["src/store.rs"]),
             ],
         }
+    }
+
+    /// A session anchored to `repo` (so decisions share a scope) with one decision turn.
+    fn decision_sess(id: &str, started: i64, repo: &str, decision: &str) -> CanonicalSession {
+        CanonicalSession {
+            native_session_id: id.into(),
+            agent: AgentKind::ClaudeCode,
+            repo_root: Some(repo.into()),
+            commit: None,
+            started_at_ms: Some(started),
+            source_path: None,
+            connector_version: None,
+            turns: vec![turn(0, MessageKind::Assistant, decision, &[])],
+        }
+    }
+
+    #[test]
+    fn supersession_detection_links_explicit_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap(); // a real path so repo_root canonicalizes
+        let rp = repo.path().to_string_lossy().to_string();
+        let mut store = Store::open(dir.path()).unwrap();
+        // older decision: sled; newer decision: redb, explicitly replacing sled.
+        store.ingest_session(&decision_sess("s1", 1000, &rp, "Let's use sled for the durable store.")).unwrap();
+        store
+            .ingest_session(&decision_sess("s2", 2000, &rp, "Switch to redb for the durable store instead of sled."))
+            .unwrap();
+
+        assert_eq!(store.detect_supersessions().unwrap(), 1, "the redb decision supersedes the unique older sled one");
+
+        let dec = |needle: &str, exclude: &str| {
+            store
+                .graph
+                .nodes
+                .values()
+                .find(|n| {
+                    n.kind == NodeKind::Decision
+                        && n.body.to_lowercase().contains(needle)
+                        && !n.body.to_lowercase().contains(exclude)
+                })
+                .map(|n| n.id)
+                .unwrap()
+        };
+        let sled = dec("sled", "redb");
+        let redb = dec("redb", "zzz");
+        assert_eq!(store.graph.superseder_of(sled), Some(redb), "recall redirects sled → redb");
+
+        // No explicit cue → no supersession (a plain second choice is NOT linked).
+        let mut s2 = Store::open(tempfile::tempdir().unwrap().path()).unwrap();
+        let r2 = tempfile::tempdir().unwrap();
+        let rp2 = r2.path().to_string_lossy().to_string();
+        s2.ingest_session(&decision_sess("a", 1000, &rp2, "Let's use sled for the store.")).unwrap();
+        s2.ingest_session(&decision_sess("b", 2000, &rp2, "Let's use redb for the store.")).unwrap();
+        assert_eq!(s2.detect_supersessions().unwrap(), 0, "no 'instead of' cue → never guessed");
     }
 
     #[test]

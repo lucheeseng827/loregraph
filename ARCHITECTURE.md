@@ -27,8 +27,8 @@ carry **As-built** notes where they differ from the original design prose.
 | WAL record | `WalRecord` = `Node \| Edge \| Vector` (CRC-framed) | `NormalizedEvent` stream |
 | redb tables | `nodes`, `edges`, `vectors` (raw f32 LE bytes), `meta` (embedder id/dim) | `+ adj`, `chash`, `cursors`, `watermark`, Parquet tier |
 | Dedup / re-index | content-addressed `NodeId` upsert (idempotent); **full re-index** each run | per-source `Cursor` watermarks + incremental checkpoint |
-| Embedder | `DynEmbedder` enum (`HashEmbedder` default \| `StaticEmbedder` GloVe word-vectors), **runtime-selected via env**; id+dim stamped in `meta`, mismatch refused | feature-gated neural (model2vec/fastembed/candle) |
-| Vector index | `BruteForceIndex` (exact cosine, id→slot map, O(1) upsert) | HNSW (`index-hnsw`), usearch |
+| Embedder | `DynEmbedder` enum (`HashEmbedder` default \| `StaticEmbedder` GloVe word-vectors \| `NeuralEmbedder` candle BERT, `--features neural`), **runtime-selected via env**; id+dim stamped in `meta`, mismatch refused | — |
+| Vector index | `VectorIndex` enum: `BruteForceIndex` (exact cosine, id→slot map, O(1) upsert) default \| pure-Rust **HNSW** behind `--features index-hnsw` (build-time swap, same seam, rebuilt from redb on open) | usearch |
 | Retriever | `ask::recall(store, query, k)` **free function** — R1 kind-prior + value-node semantic set, graph hop, exact-lexical, **BM25 fallback**, R4 centrality (value nodes) + supersession finalize | `Retriever` trait + `HybridRetriever` + `RecallQuery{weights,seed,…}` |
 | commit-provenance | **gix in the default build** — `Commit` nodes, `File`-`ChangedBy`, contemporaneous `commit` stamped on sessions (`same_git_tree` guard) | (was Beta; shipped early) |
 | Decision extraction | deterministic cue-phrase + noise/substance filter (`is_low_value_turn`); **`byo-llm` scaffolded** behind a feature | byo-llm wired into ingest; Pattern/DebtSignal |
@@ -452,13 +452,13 @@ untrusted).
 
 > **As-built:** the seams are **concrete types**, not the object-safe traits below. There is
 > no `GraphStore`/`EmbeddingIndex`/`Retriever` trait yet — recall is a free function over a
-> concrete `Store { MemGraph, BruteForceIndex, DynEmbedder, redb Database, Wal }`. The one
-> real trait is `Embedder` (implemented by `HashEmbedder`, `StaticEmbedder`, and the
-> `DynEmbedder` enum that dispatches between them). Its as-built signature differs from the
-> design — `fn id(&self) -> String; fn dim(&self) -> usize; fn embed(&self, &str) -> Vec<f32>`
-> (infallible, plus `dim()` for the store's mismatch guard). The trait abstraction below is
-> the target for when a second backend (HNSW, neural embedder) actually lands; until then
-> concrete types keep it simple.
+> concrete `Store { MemGraph, VectorIndex, DynEmbedder, redb Database, Wal }`. The one
+> real trait is `Embedder` (implemented by `HashEmbedder`, `StaticEmbedder`, `NeuralEmbedder`,
+> and the `DynEmbedder` enum that dispatches between them). Its as-built signature differs from
+> the design — `fn id(&self) -> String; fn dim(&self) -> usize; fn embed(&self, &str) -> Vec<f32>`
+> (infallible, plus `dim()` for the store's mismatch guard). The vector index follows the same
+> shape: a `VectorIndex` enum dispatching `BruteForceIndex` (default) or the `index-hnsw` HNSW
+> backend — concrete enums over a `dyn` trait, chosen at build time.
 
 The design: every engine seam has a **deps-free default impl** plus a **feature-gated heavy
 impl**, so a backend swap is never a rewrite. Core traits are object-safe, no async in core.
@@ -490,8 +490,8 @@ pub trait Retriever: Send + Sync { fn recall(&self, q: &RecallQuery) -> Result<R
 | Seam | Default impl (zero ML/network/C) | Heavier impl | As-built status |
 |---|---|---|---|
 | Graph store | `MemGraph` (petgraph) + redb always-on | — | ✅ redb is the durable base today (not a `persist` feature) |
-| Vector index | `BruteForceIndex` (exact cosine, O(1) upsert) | HNSW (`index-hnsw`), usearch | ✅ brute force; HNSW deferred |
-| `Embedder` | `HashEmbedder` (token-bag) | `StaticEmbedder` (GloVe word-vectors, **runtime-selected**, no dep); neural (model2vec/fastembed/candle) feature-gated | ✅ Hash + Static; neural deferred |
+| Vector index | `BruteForceIndex` (exact cosine, O(1) upsert) | HNSW (`index-hnsw`), usearch | ✅ brute force (default) + pure-Rust HNSW behind `index-hnsw` (recall@1 ≥ 0.98 vs oracle at 256-dim); usearch deferred |
+| `Embedder` | `HashEmbedder` (token-bag) | `StaticEmbedder` (GloVe word-vectors, **runtime-selected**, no dep); neural (candle) feature-gated | ✅ Hash + Static + neural (`--features neural`) |
 | Retriever | `ask::recall` free function (R1–R4) | — | ✅ shipped; not a trait yet |
 
 The `SessionSource` and `SymbolExtractor` seams follow the same rule: connectors default
@@ -500,8 +500,9 @@ defaults to the heuristic scanner with tree-sitter AST behind `treesitter` (the 
 dependency, opt-in) as the design target. **Default-build invariant: zero ML / network / C
 deps; air-gap-clean.** Today, real **semantic** recall is turned on at runtime
 (`LORE_EMBED_BACKEND=static LORE_EMBED_MODEL=…`, no rebuild); the `mcp` and `byo-llm`
-features add the MCP server and the LLM extractor; HNSW / neural embedders / `treesitter` /
-DataFusion remain deferred.
+features add the MCP server and the LLM extractor; the `index-hnsw` (sublinear vector search)
+and `neural` (candle embedder) features are implemented and opt-in; `treesitter` / DataFusion
+remain deferred.
 
 ## 8. Workspace shape
 

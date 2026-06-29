@@ -25,8 +25,8 @@ loregraph is one process / one binary that does four things no incumbent does al
 at once:
 
 1. **Ingests, read-only, the on-disk transcripts your agents already produce** —
-   Claude Code JSONL (`~/.claude/projects/<slug>/*.jsonl`), aider history, Codex CLI
-   rollouts — not a write-API you have to call, not OS screen-capture.
+   Claude Code JSONL (`~/.claude/projects/<slug>/*.jsonl`) and Codex CLI rollouts today
+   (aider / Cursor next) — not a write-API you have to call, not OS screen-capture.
 2. **Fuses them with the repo** — files, symbols, manifests, git history — into one
    durable graph of `Decision` and `Implementation` nodes.
 3. **Anchors every value node with hard provenance** — a `session_id` + a repo
@@ -84,20 +84,23 @@ crash-safe WAL → redb commit protocol; consumers (canvas, MCP) read it. The di
 flowchart TB
   subgraph sources ["sources — read-only, the user's own data"]
     cc["Claude Code JSONL<br/>~/.claude/projects/&lt;slug&gt;/*.jsonl"]
+    cdx["Codex CLI rollouts<br/>~/.codex/sessions/*.jsonl"]
     repo["repo + git history (gix) + ADRs"]
-    aid["aider · Codex · Cursor<br/>(design target)"]
+    aid["aider · Cursor<br/>(design target)"]
   end
   subgraph ingest ["ingest (synchronous) — redact → WalRecord batch"]
     redact["redact-on-ingest (secrets) → &lt;redacted:kind:hash&gt;"]
-    extract["extract: decisions (cue + noise filter)<br/>repo symbols · gix Commit/ChangedBy · embed"]
+    extract["extract: decisions (cue + noise filter)<br/>byo-llm augment (--features byo-llm)<br/>repo symbols · gix Commit/ChangedBy<br/>embed (hash · static · neural)"]
   end
   subgraph engine ["loregraph engine"]
     wal[("WAL — CRC-framed, the ACK boundary")]
     store[("redb: nodes · edges · vectors(raw f32) · meta(embedder)")]
-    mem["MemGraph (petgraph) + BruteForceIndex<br/>rehydrated from redb"]
+    mem["MemGraph (petgraph) + VectorIndex<br/>BruteForce (exact) | HNSW (--features index-hnsw)<br/>rehydrated from redb"]
   end
   subgraph recall ["recall — ask::recall()"]
-    rk["R1 kind-prior · semantic(value nodes) · graph hop<br/>exact-lexical · BM25 fallback · centrality · supersession"]
+    sup["supersedes drift-detection (index-time)<br/>explicit 'instead of X' → Supersedes edge"]
+    rk["R1 kind-prior · semantic(value nodes) · graph hop<br/>exact-lexical · BM25 fallback · centrality · R4 supersession filter"]
+    sup --> rk
   end
   subgraph consumers ["consumers"]
     canvas["canvas SPA — rust-embed, hand-rolled Canvas2D"]
@@ -105,6 +108,7 @@ flowchart TB
   end
   agent["coding agent"]
   cc --> ingest
+  cdx --> ingest
   repo --> ingest
   aid -. planned .-> ingest
   ingest --> wal --> store --> mem --> rk
@@ -113,11 +117,18 @@ flowchart TB
   mcp -. "agent self-recall" .-> agent
 ```
 
-**Components (as-built).** Embedder is runtime-selected — `HashEmbedder` (default, lexical)
-or `StaticEmbedder` (real semantics from a local GloVe vectors file), with the embedder
-id/dim stamped in redb and a mismatched embedder refused at open. Every value node cites its
-`session_id` **and** the contemporaneous repo `commit` (gix, in the default build). The
-optional LLM decision extractor is scaffolded behind `--features byo-llm`.
+**Components (as-built).** Embedder is runtime-selected (`LORE_EMBED_BACKEND`) across three
+tiers — `HashEmbedder` (default, lexical, deps-free), `StaticEmbedder` (semantic, local GloVe
+vectors, no inference) and `NeuralEmbedder` (contextual BERT via candle, `--features neural`)
+— with the embedder id/dim stamped in redb and a mismatched embedder refused at open. Every
+value node cites its `session_id` **and** the contemporaneous repo `commit` (gix, in the
+default build). Supersedes drift-detection links an explicit `… instead of <X> …` decision to
+the unique older same-scope choice at index time, lighting up the R4 supersession filter in
+recall. The BYO-key LLM decision extractor is wired into ingest behind `--features byo-llm`
+(deterministic fallback on error). The vector index is a `VectorIndex` enum — exact
+`BruteForceIndex` by default, or a pure-Rust zero-dep **HNSW** behind `--features index-hnsw`
+(a build-time swap at the same seam, rebuilt from redb on open, pinned at recall@1 ≥ 0.98 vs
+the exact oracle at the 256-dim embedding width).
 
 See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the **as-built vs design-target** map, the
 store / commit protocol, the graph model, the recall pipeline (R1–R4 / T1–T2), the MCP
@@ -137,11 +148,37 @@ does not cannibalize them; they compose.
 The composition is: MCPd in front, loregraph behind, loregraph reading recall / evald
 output as additional sources.
 
+## Install
+
+Every channel ships the **default build** — pure-Rust, static, zero Python/C/ML/network deps.
+Each tagged release publishes static-musl (`x86_64` + `aarch64`) tarballs, macOS + Windows
+archives, a `SHA256SUMS`, and a distroless container.
+
+```bash
+# prebuilt binary (no toolchain) — picks the right release asset for your platform
+cargo binstall lore
+
+# Homebrew (this repo is its own tap) — macOS + Linux
+brew tap lucheeseng827/loregraph https://github.com/lucheeseng827/loregraph
+brew install lore
+
+# distroless container (linux/amd64 + linux/arm64), runs as nonroot
+docker run --rm mancube/loregraph:latest version
+
+# from source (needs a Rust toolchain)
+cargo install --git https://github.com/lucheeseng827/loregraph lore
+```
+
+Or grab a tarball from [Releases](https://github.com/lucheeseng827/loregraph/releases) and
+verify it against `SHA256SUMS`. Opt-in features (`mcp`, `neural`, `byo-llm`, `index-hnsw`) are
+source-only — build with `cargo install --git … --features <name>`.
+
 ## Quick start
 
 > **Status: the PoC slice works today.** `index` / `ask` / `serve` (canvas) / `doctor` run
-> now, and the MCP server runs behind `--features mcp`. Still planned per [`PLAN.md`](./PLAN.md):
-> the Codex / aider / Cursor / OpenRouter connectors and the Cytoscape/Sigma renderer tiers
+> now, and the MCP server runs behind `--features mcp`. The Claude Code and Codex connectors
+> ingest today. Still planned per [`PLAN.md`](./PLAN.md): the aider / Cursor / OpenRouter
+> connectors and the Cytoscape/Sigma renderer tiers
 > (the PoC canvas is a hand-rolled Canvas2D renderer).
 
 ```bash

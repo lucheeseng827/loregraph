@@ -1,0 +1,7 @@
+# Keep the build context tiny + reproducible (the Dockerfile builds from source).
+target
+.git
+.lore
+node_modules
+*.tar.gz
+*.zip

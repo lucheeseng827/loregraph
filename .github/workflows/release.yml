@@ -1,0 +1,205 @@
+# loregraph release pipeline — runs on the PUBLIC mirror (lucheeseng827/loregraph).
+#
+# Synced from the private monorepo to `.github/workflows/release.yml` (see .ossync.yaml). Cuts a
+# release on a `v*` tag:
+#   1. build  — static musl (x86_64 + aarch64) + macOS (x86_64 + arm64) + Windows; archive + sha256
+#   2. release— attach every artifact + a SHA256SUMS file to the GitHub release
+#   3. brew   — rewrite Formula/lore.rb with the tag version + the four desktop sha256, commit to main
+#   4. docker — buildx multi-arch (linux/amd64 + linux/arm64) distroless image → Docker Hub
+#               (docker.io/mancube/loregraph)
+#
+# Covers all four MVP distribution channels: musl static, cargo-binstall (matches the asset
+# names), Homebrew (this repo is its own tap), and a distroless container.
+#
+# Mirror repo secrets required for the docker job: DOCKER_USERNAME (= "mancube") and
+# DOCKER_PASSWORD (a Docker Hub access token with Read/Write on mancube/loregraph).
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v0.1.0"
+        required: true
+      promote:
+        description: "Promote formula + :latest image (only safe for the newest tag)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # create the release + commit the formula bump
+  # (image push goes to Docker Hub via DOCKER_USERNAME/DOCKER_PASSWORD — no GH packages scope.)
+
+env:
+  BIN: lore
+  IMAGE: docker.io/mancube/loregraph
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl,  os: ubuntu-latest,  cross: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest,  cross: true }
+          - { target: x86_64-apple-darwin,         os: macos-13 }
+          - { target: aarch64-apple-darwin,        os: macos-14 }
+          - { target: x86_64-pc-windows-msvc,      os: windows-latest }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (linux musl)
+        if: matrix.cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --bin "$BIN" --target ${{ matrix.target }}
+
+      - name: Build (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --bin "$BIN" --target ${{ matrix.target }}
+        shell: bash
+
+      - name: Package
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist="target/${{ matrix.target }}/release"
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            asset="${BIN}-${{ matrix.target }}.zip"
+            (
+              cd "$dist"
+              7z a "$GITHUB_WORKSPACE/$asset" "${BIN}.exe" >/dev/null
+            )
+          else
+            asset="${BIN}-${{ matrix.target }}.tar.gz"
+            tar -czf "$asset" -C "$dist" "$BIN"
+          fi
+          # sha256 sidecar (portable across runner OSes)
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$asset" > "$asset.sha256"
+          else
+            shasum -a 256 "$asset" > "$asset.sha256"
+          fi
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ steps.pkg.outputs.asset }}
+            ${{ steps.pkg.outputs.asset }}.sha256
+          if-no-files-found: error
+
+  release:
+    name: github release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - name: Aggregate checksums
+        run: cat dist/*.sha256 | sed 's# .*/# #' > dist/SHA256SUMS
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+
+  brew:
+    name: bump homebrew formula
+    needs: release
+    # Promote to `brew install lore` only for a real (non pre-release) tag, and only when pushed
+    # or `promote` was requested — so a `v*-rc.N` smoke test never serves an rc to brew users.
+    if: ${{ !contains(github.event.inputs.tag || github.ref_name, '-') && (github.event_name == 'push' || inputs.promote) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main }
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - name: Rewrite Formula/lore.rb
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${TAG#v}"
+          sha() { cut -d' ' -f1 < "dist/${BIN}-$1.tar.gz.sha256"; }
+          mac_arm=$(sha aarch64-apple-darwin)
+          mac_x86=$(sha x86_64-apple-darwin)
+          lin_arm=$(sha aarch64-unknown-linux-musl)
+          lin_x86=$(sha x86_64-unknown-linux-musl)
+          python3 - "$ver" "$mac_arm" "$mac_x86" "$lin_arm" "$lin_x86" <<'PY'
+          import re, sys
+          ver, mac_arm, mac_x86, lin_arm, lin_x86 = sys.argv[1:6]
+          p = "Formula/lore.rb"
+          s = open(p).read()
+          s = re.sub(r'version "[^"]*"', f'version "{ver}"', s, count=1)
+          # The four sha256 lines appear in file order: mac arm, mac intel, linux arm, linux intel.
+          shas = [mac_arm, mac_x86, lin_arm, lin_x86]
+          it = iter(shas)
+          s = re.sub(r'sha256 "[0-9a-f]{64}"', lambda m: f'sha256 "{next(it)}"', s)
+          open(p, "w").write(s)
+          PY
+      - name: Commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/lore.rb
+          git commit -m "brew: lore ${TAG}" || { echo "no formula change"; exit 0; }
+          git push origin main
+
+  docker:
+    name: distroless image
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Compute image tags
+        id: imgtags
+        env:
+          # Advance :latest only for a real release that is being promoted (push or promote).
+          PROMOTE: ${{ github.event_name == 'push' || inputs.promote }}
+        shell: bash
+        run: |
+          tags="${IMAGE}:${TAG}"
+          if [[ "$TAG" != *-* && "$PROMOTE" == "true" ]]; then tags="$tags"$'\n'"${IMAGE}:latest"; fi
+          { echo "list<<EOF"; echo "$tags"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+      - name: Build + push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.imgtags.outputs.list }}

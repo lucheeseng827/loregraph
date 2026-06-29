@@ -212,12 +212,19 @@ fn cmd_index(
     if dry_run {
         println!("(dry-run: nothing written)");
     } else {
+        // Drift detection: link explicitly-superseded decisions (R4) over the full graph.
+        let superseded = store.detect_supersessions()?;
+        if superseded > 0 {
+            println!("supersedes: linked {superseded} superseded decision(s)");
+        }
+        let index_backend = store.index.backend();
         store.save()?;
         println!(
-            "graph: {} nodes, {} edges, {} embeddings → {}",
+            "graph: {} nodes, {} edges, {} embeddings ({}) → {}",
             store.graph.node_count(),
             store.graph.edge_count(),
             store.index.len(),
+            index_backend,
             data_dir.display()
         );
     }

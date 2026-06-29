@@ -12,9 +12,13 @@
 //!   recall quality ceiling-raiser, still air-gap-clean because the model is a local file
 //!   the operator supplies, loaded once.
 //!
-//! Heavier neural backends (fastembed/candle = transformer inference) remain future work
-//! behind a cargo feature; the static table needs no extra dependency, so it always compiles
-//! and is chosen at runtime via `LORE_EMBED_BACKEND` / `lore.toml`.
+//! - `NeuralEmbedder` (feature `neural`) — **contextual** sentence embeddings from a local
+//!   BERT-family transformer (candle, pure-Rust CPU, no ONNX/C), loaded from a model directory.
+//!   Heaviest + highest-quality; off by default.
+//!
+//! All three sit behind one [`Embedder`] trait + the [`DynEmbedder`] enum, chosen at runtime
+//! via `LORE_EMBED_BACKEND` / `lore.toml`. The static table needs no extra dependency so it
+//! always compiles; `neural` pulls candle only under `--features neural`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -187,12 +191,14 @@ impl Embedder for StaticEmbedder {
 pub enum DynEmbedder {
     Hash(HashEmbedder),
     Static(StaticEmbedder),
+    #[cfg(feature = "neural")]
+    Neural(neural::NeuralEmbedder),
 }
 
 impl DynEmbedder {
     /// Select the embedder from the environment:
-    /// - `LORE_EMBED_BACKEND` = `hash` (default) | `static` (alias `localmodel`)
-    /// - `LORE_EMBED_MODEL`   = path to the vectors file (required for `static`)
+    /// - `LORE_EMBED_BACKEND` = `hash` (default) | `static` (alias `localmodel`) | `neural`
+    /// - `LORE_EMBED_MODEL`   = vectors file (`static`) or model directory (`neural`)
     pub fn from_env() -> anyhow::Result<Self> {
         let backend = std::env::var("LORE_EMBED_BACKEND").unwrap_or_else(|_| "hash".to_string());
         match backend.as_str() {
@@ -206,7 +212,23 @@ impl DynEmbedder {
                 })?;
                 Ok(DynEmbedder::Static(StaticEmbedder::load(Path::new(&path))?))
             }
-            other => anyhow::bail!("unknown LORE_EMBED_BACKEND {other:?} (expected: hash | static)"),
+            "neural" => {
+                #[cfg(feature = "neural")]
+                {
+                    let path = std::env::var("LORE_EMBED_MODEL").map_err(|_| {
+                        anyhow::anyhow!(
+                            "LORE_EMBED_BACKEND=neural needs LORE_EMBED_MODEL=<dir> with \
+                             config.json + tokenizer.json + model.safetensors"
+                        )
+                    })?;
+                    Ok(DynEmbedder::Neural(neural::NeuralEmbedder::load(Path::new(&path))?))
+                }
+                #[cfg(not(feature = "neural"))]
+                {
+                    anyhow::bail!("LORE_EMBED_BACKEND=neural requires building with `--features neural`")
+                }
+            }
+            other => anyhow::bail!("unknown LORE_EMBED_BACKEND {other:?} (expected: hash | static | localmodel | neural)"),
         }
     }
 }
@@ -216,18 +238,117 @@ impl Embedder for DynEmbedder {
         match self {
             DynEmbedder::Hash(e) => e.id(),
             DynEmbedder::Static(e) => e.id(),
+            #[cfg(feature = "neural")]
+            DynEmbedder::Neural(e) => e.id(),
         }
     }
     fn dim(&self) -> usize {
         match self {
             DynEmbedder::Hash(e) => e.dim(),
             DynEmbedder::Static(e) => e.dim(),
+            #[cfg(feature = "neural")]
+            DynEmbedder::Neural(e) => e.dim(),
         }
     }
     fn embed(&self, text: &str) -> Vec<f32> {
         match self {
             DynEmbedder::Hash(e) => e.embed(text),
             DynEmbedder::Static(e) => e.embed(text),
+            #[cfg(feature = "neural")]
+            DynEmbedder::Neural(e) => e.embed(text),
+        }
+    }
+}
+
+/// The neural (transformer) embedder lives in its own module so candle/tokenizers only compile
+/// under `--features neural`.
+#[cfg(feature = "neural")]
+mod neural {
+    use super::{l2_normalize, Embedder};
+    use std::path::Path;
+
+    use candle_core::{DType, Device, Tensor};
+    use candle_nn::VarBuilder;
+    use candle_transformers::models::bert::{BertModel, Config, DTYPE};
+    use tokenizers::Tokenizer;
+
+    /// Contextual sentence embeddings from a local BERT-family model (candle, CPU). Loads
+    /// `config.json` + `tokenizer.json` + `model.safetensors` from a directory; embed =
+    /// tokenize → forward → **attention-masked mean-pool** → L2-normalize. No network.
+    pub struct NeuralEmbedder {
+        id: String,
+        dim: usize,
+        model: BertModel,
+        tokenizer: Tokenizer,
+        device: Device,
+    }
+
+    impl NeuralEmbedder {
+        pub fn load(dir: &Path) -> anyhow::Result<Self> {
+            let device = Device::Cpu;
+            let config: Config = serde_json::from_str(
+                &std::fs::read_to_string(dir.join("config.json"))
+                    .map_err(|e| anyhow::anyhow!("reading config.json: {e}"))?,
+            )?;
+            let mut tokenizer = Tokenizer::from_file(dir.join("tokenizer.json"))
+                .map_err(|e| anyhow::anyhow!("loading tokenizer.json: {e}"))?;
+            // Truncate at the model's max sequence length so overlong inputs never reach
+            // forward() raw (which would panic or fail, producing a zero-vector fallback).
+            tokenizer
+                .with_truncation(Some(tokenizers::TruncationParams {
+                    max_length: config.max_position_embeddings,
+                    ..Default::default()
+                }))
+                .map_err(|e| anyhow::anyhow!("setting tokenizer truncation: {e}"))?;
+            let weights = dir.join("model.safetensors");
+            let vb = unsafe {
+                VarBuilder::from_mmaped_safetensors(&[weights], DTYPE, &device)
+                    .map_err(|e| anyhow::anyhow!("loading model.safetensors: {e}"))?
+            };
+            let model = BertModel::load(vb, &config)?;
+            let dim = config.hidden_size;
+            let stem = dir.file_name().and_then(|s| s.to_str()).unwrap_or("model");
+            Ok(NeuralEmbedder { id: format!("neural:{stem}:{dim}"), dim, model, tokenizer, device })
+        }
+
+        fn embed_inner(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            let enc = self
+                .tokenizer
+                .encode(text, true)
+                .map_err(|e| anyhow::anyhow!("tokenize: {e}"))?;
+            let ids: Vec<u32> = enc.get_ids().to_vec();
+            let mask: Vec<u32> = enc.get_attention_mask().to_vec();
+            let n = ids.len();
+            let input_ids = Tensor::from_vec(ids, (1, n), &self.device)?;
+            let attn = Tensor::from_vec(mask, (1, n), &self.device)?;
+            let token_type = input_ids.zeros_like()?;
+            // [1, seq, hidden]
+            let hidden = self.model.forward(&input_ids, &token_type, Some(&attn))?;
+            // attention-masked mean over the sequence dimension.
+            let mask_f = attn.to_dtype(DType::F32)?.unsqueeze(2)?; // [1, seq, 1]
+            let summed = hidden.broadcast_mul(&mask_f)?.sum(1)?; // [1, hidden]
+            let counts = mask_f.sum(1)?; // [1, 1]
+            let mean = summed.broadcast_div(&counts)?; // [1, hidden]
+            let mut v: Vec<f32> = mean.squeeze(0)?.to_vec1()?;
+            l2_normalize(&mut v);
+            Ok(v)
+        }
+    }
+
+    impl Embedder for NeuralEmbedder {
+        fn id(&self) -> String {
+            self.id.clone()
+        }
+        fn dim(&self) -> usize {
+            self.dim
+        }
+        fn embed(&self, text: &str) -> Vec<f32> {
+            // The trait is infallible; a forward error degrades to a zero vector (logged) so a
+            // single bad input never aborts an index run.
+            self.embed_inner(text).unwrap_or_else(|e| {
+                tracing::warn!("neural embed failed: {e}");
+                vec![0.0; self.dim]
+            })
         }
     }
 }
