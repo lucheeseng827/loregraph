@@ -48,7 +48,10 @@ jobs:
         include:
           - { target: x86_64-unknown-linux-musl,  os: ubuntu-latest,  cross: true }
           - { target: aarch64-unknown-linux-musl, os: ubuntu-latest,  cross: true }
-          - { target: x86_64-apple-darwin,         os: macos-13 }
+          # Both macOS targets build on macos-14 (Apple Silicon): arm64 native, x86_64 via an
+          # in-macOS cross-compile (`cargo build --target x86_64-apple-darwin`, no extra linker).
+          # macos-13 (Intel) is being retired and queues for many minutes — avoid it.
+          - { target: x86_64-apple-darwin,         os: macos-14 }
           - { target: aarch64-apple-darwin,        os: macos-14 }
           - { target: x86_64-pc-windows-msvc,      os: windows-latest }
     steps:
