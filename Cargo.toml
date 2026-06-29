@@ -14,13 +14,13 @@ edition = "2021"
 license = "Apache-2.0"
 description = "loregraph — memory knowledge-graph for AI coding-agent sessions + repos (single binary). PoC: Claude Code chat ingest + repo crunch + graph + canvas."
 repository = "https://github.com/lucheeseng827/loregraph"
-publish = false
+publish = true
 
 # cargo-binstall: fetch the prebuilt `lore` binary from a GitHub release instead of compiling.
-#   cargo binstall lore
+#   cargo binstall loregraph
 # `{ repo }` resolves from `repository` above (rewritten to the public mirror on sync); asset
-# names match the release workflow's `lore-<target>.<ext>` artifacts. Inert in the monorepo
-# (publish = false); active on the published `loregraph` crate.
+# names match the release workflow's `lore-<target>.<ext>` artifacts. Inert in the monorepo;
+# the OSS sync flips `publish` so the standalone `loregraph` crate publishes to crates.io.
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/lore-{ target }{ archive-suffix }"
 bin-dir = "lore{ binary-ext }"

@@ -154,9 +154,11 @@ Every channel ships the **default build** — pure-Rust, static, zero Python/C/M
 Each tagged release publishes static-musl (`x86_64` + `aarch64`) tarballs, macOS + Windows
 archives, a `SHA256SUMS`, and a distroless container.
 
+The crate is **`loregraph`**; it installs a binary named **`lore`**.
+
 ```bash
 # prebuilt binary (no toolchain) — picks the right release asset for your platform
-cargo binstall lore
+cargo binstall loregraph
 
 # Homebrew (this repo is its own tap) — macOS + Linux
 brew tap lucheeseng827/loregraph https://github.com/lucheeseng827/loregraph
@@ -165,13 +167,16 @@ brew install lore
 # distroless container (linux/amd64 + linux/arm64), runs as nonroot
 docker run --rm mancube/loregraph:latest version
 
-# from source (needs a Rust toolchain)
-cargo install --git https://github.com/lucheeseng827/loregraph lore
+# from crates.io (needs a Rust toolchain)
+cargo install loregraph
+
+# or from source
+cargo install --git https://github.com/lucheeseng827/loregraph loregraph
 ```
 
 Or grab a tarball from [Releases](https://github.com/lucheeseng827/loregraph/releases) and
 verify it against `SHA256SUMS`. Opt-in features (`mcp`, `neural`, `byo-llm`, `index-hnsw`) are
-source-only — build with `cargo install --git … --features <name>`.
+source-only — build with `cargo install loregraph --features <name>`.
 
 ## Quick start
 

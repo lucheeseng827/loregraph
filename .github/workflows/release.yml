@@ -4,8 +4,9 @@
 # release on a `v*` tag:
 #   1. build  — static musl (x86_64 + aarch64) + macOS (x86_64 + arm64) + Windows; archive + sha256
 #   2. release— attach every artifact + a SHA256SUMS file to the GitHub release
-#   3. brew   — rewrite Formula/lore.rb with the tag version + the four desktop sha256, commit to main
-#   4. docker — buildx multi-arch (linux/amd64 + linux/arm64) distroless image → Docker Hub
+#   3. crates — `cargo publish` the loregraph crate (real tags only; idempotent)
+#   4. brew   — rewrite Formula/lore.rb with the tag version + the four desktop sha256, commit to main
+#   5. docker — buildx multi-arch (linux/amd64 + linux/arm64) distroless image → Docker Hub
 #               (docker.io/mancube/loregraph)
 #
 # Covers all four MVP distribution channels: musl static, cargo-binstall (matches the asset
@@ -138,6 +139,34 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/SHA256SUMS
+
+  cratesio:
+    name: publish to crates.io
+    needs: release
+    # Publish only a real (non pre-release) tag that was pushed or explicitly promoted. crates.io
+    # is append-only (versions can be yanked, never overwritten) — never publish an rc.
+    if: ${{ !contains(github.event.inputs.tag || github.ref_name, '-') && (github.event_name == 'push' || inputs.promote) }}
+    # CRATESIO_TOKEN (a crates.io API token with publish scope) lives in the `cicd` environment.
+    environment: cicd
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATESIO_TOKEN }}
+        run: |
+          set -euo pipefail
+          ver="${TAG#v}"
+          # Idempotent: a re-run of an already-published version is a no-op, not a failure.
+          if curl -sf "https://crates.io/api/v1/crates/loregraph/${ver}" >/dev/null 2>&1; then
+            echo "loregraph ${ver} already on crates.io — skipping"
+          else
+            cargo publish
+          fi
 
   brew:
     name: bump homebrew formula

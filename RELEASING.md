@@ -25,7 +25,8 @@ Releases are cut by tag. `.github/workflows/release.yml` does the rest.
 
 | Channel | Source of truth |
 |---|---|
-| `cargo binstall lore` | release tarballs; asset names from `[package.metadata.binstall]` in `Cargo.toml` |
+| `cargo binstall loregraph` | release tarballs; asset names from `[package.metadata.binstall]` in `Cargo.toml` |
+| `cargo install loregraph` | crates.io (published by the release workflow on each real tag) |
 | `brew install lore` | `Formula/lore.rb` (this repo is its own tap) |
 | `docker run … mancube/loregraph` | `Dockerfile` (distroless, self-building musl) |
 | `cargo install --git …` | the crate source |

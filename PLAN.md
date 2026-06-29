@@ -501,7 +501,7 @@ edition = "2021"
 license = "Apache-2.0"
 description = "loregraph — memory knowledge-graph for AI coding-agent sessions + repos (single binary). PoC: chat ingest + graph + canvas."
 repository = "https://github.com/lucheeseng827/loregraph"
-publish = false
+publish = true
 [profile.release]
 opt-level = "z"
 lto = true
