@@ -8,22 +8,22 @@ class Lore < Formula
   on_macos do
     on_arm do
       url "https://github.com/lucheeseng827/loregraph/releases/download/v#{version}/lore-aarch64-apple-darwin.tar.gz"
-      sha256 "a1a64bdcd8eeadc8a5727c234cdbc8822f70cdb3051235134083ebded9a3b2cc"
+      sha256 "78b2fbca932599fd09d8a324eb26863feb9b75cf80e6f513602ef7f6fb5472d7"
     end
     on_intel do
       url "https://github.com/lucheeseng827/loregraph/releases/download/v#{version}/lore-x86_64-apple-darwin.tar.gz"
-      sha256 "1591a9a0e7141a7b22a08057a4a2cd14086dd041385dab8cdb72807c4e5292cd"
+      sha256 "fe57cb6e1fb10716aa8f5e6e6315ecd5eb380a2592590e85ab6e4797f606650c"
     end
   end
 
   on_linux do
     on_arm do
       url "https://github.com/lucheeseng827/loregraph/releases/download/v#{version}/lore-aarch64-unknown-linux-musl.tar.gz"
-      sha256 "711601d7c302652c187baea402b226e2bfd5f74b34867f7355b3ec8dbdd73f72"
+      sha256 "4065f1d59560bf8f460a624b586a4636a8d9b57ed5d6a64c63b8c38f89bc6c55"
     end
     on_intel do
       url "https://github.com/lucheeseng827/loregraph/releases/download/v#{version}/lore-x86_64-unknown-linux-musl.tar.gz"
-      sha256 "72b08991a4375c14f8fea57b3838f290420306a8a610fbd5a94ff224624784f9"
+      sha256 "d1df1cb43cb761ca8fb680dc0c2daf421ab1e4d7a25293ef9a1e1ca4910cdf19"
     end
   end
 
