@@ -9,7 +9,7 @@ panic = "unwind"
 
 [package]
 name = "loregraph"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "Apache-2.0"
 description = "loregraph — memory knowledge-graph for AI coding-agent sessions + repos (single binary). PoC: Claude Code chat ingest + repo crunch + graph + canvas."
