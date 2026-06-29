@@ -120,7 +120,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with: { path: dist, merge-multiple: true }
       - name: Aggregate checksums
-        run: cat dist/*.sha256 | sed 's# .*/# #' > dist/SHA256SUMS
+        # Block scalar (not a one-liner): the per-asset .sha256 files already hold bare
+        # filenames, so just concatenate them. A plain `run:` with a `#` would be parsed as a
+        # YAML comment and silently truncated.
+        run: |
+          ( cd dist && cat ./*.sha256 > SHA256SUMS && cat SHA256SUMS )
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
