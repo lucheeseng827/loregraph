@@ -199,6 +199,21 @@ jobs:
           registry: docker.io
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Stage prebuilt binaries into the build context
+        # Reuse the build matrix's static musl binaries (built natively/cross in ~2 min) instead
+        # of recompiling under QEMU. Lay them out as lore-<arch> for Dockerfile.release's COPY.
+        uses: actions/download-artifact@v4
+        with:
+          path: art
+          merge-multiple: true
+      - name: Lay out the context
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ctx
+          tar -xzf art/lore-x86_64-unknown-linux-musl.tar.gz  -C ctx && mv ctx/lore ctx/lore-amd64
+          tar -xzf art/lore-aarch64-unknown-linux-musl.tar.gz -C ctx && mv ctx/lore ctx/lore-arm64
+          cp Dockerfile.release ctx/Dockerfile
       - name: Compute image tags
         id: imgtags
         env:
@@ -212,7 +227,16 @@ jobs:
       - name: Build + push
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ctx
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.imgtags.outputs.list }}
+      - name: Update Docker Hub description
+        # Only on a real (promoted) release — never let an rc rewrite the public overview.
+        if: ${{ !contains(env.TAG, '-') && (github.event_name == 'push' || inputs.promote) }}
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+          repository: mancube/loregraph
+          readme-filepath: ./docs/DOCKERHUB.md

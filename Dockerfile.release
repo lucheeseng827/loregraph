@@ -1,0 +1,17 @@
+# Release image — assembles the distroless container from the ALREADY-BUILT static musl
+# binaries (the release build matrix produced them natively/cross in ~2 min each). No compile
+# here, so the multi-arch buildx is seconds instead of a 30-min emulated arm64 cargo+LTO build.
+#
+# The docker job stages `lore-amd64` and `lore-arm64` into the build context; buildx sets
+# TARGETARCH per platform, so each image gets its matching static binary.
+#
+# For a from-source local build use the plain ./Dockerfile instead.
+FROM gcr.io/distroless/static-debian12:nonroot
+ARG TARGETARCH
+LABEL org.opencontainers.image.source="https://github.com/lucheeseng827/loregraph" \
+      org.opencontainers.image.description="Memory knowledge-graph for AI coding-agent sessions + repos (single binary)" \
+      org.opencontainers.image.licenses="Apache-2.0"
+COPY lore-${TARGETARCH} /usr/local/bin/lore
+EXPOSE 7700
+ENTRYPOINT ["/usr/local/bin/lore"]
+CMD ["version"]
