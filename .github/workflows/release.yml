@@ -131,6 +131,9 @@ jobs:
           tag_name: ${{ env.TAG }}
           generate_release_notes: true
           fail_on_unmatched_files: true
+          # A tag with a pre-release suffix (vX.Y.Z-rc.N) is marked a GitHub pre-release — the
+          # safe way to exercise the pipeline without presenting an rc as a GA download.
+          prerelease: ${{ contains(env.TAG, '-') }}
           files: |
             dist/*.tar.gz
             dist/*.zip
