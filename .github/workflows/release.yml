@@ -184,6 +184,9 @@ jobs:
   docker:
     name: distroless image
     needs: release
+    # The Docker Hub creds (DOCKER_USERNAME/DOCKER_PASSWORD) live in the `cicd` environment;
+    # a job only sees environment-scoped secrets when it declares the environment.
+    environment: cicd
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
